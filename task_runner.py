@@ -119,8 +119,8 @@ class TaskRunner:
             frame_size = VisionCapture.frame_size(frame)
             observation = self.logger.log_observation(step, frame)
 
-            decision = self.engine.next_step(VisionCapture.frame_to_jpeg(frame), frame_size,
-                                             instruction, history, holding)
+            jpeg = VisionCapture.frame_to_jpeg(frame)
+            decision = self.engine.next_step(jpeg, frame_size, instruction, history, holding)
             record = {"step": step, "observation": observation, "faces_blurred": faces,
                       "holding_before": holding}
             if decision is None:
@@ -153,6 +153,20 @@ class TaskRunner:
 
             # 2. Task finished or impossible
             if decision.status == Status.DONE:
+                # Independent end-of-task check (the oracle policy used in tests has none)
+                verify = getattr(self.engine, "verify_done", None)
+                check = verify(jpeg, instruction) if verify else None
+                if check is not None:
+                    record["final_check"] = check.model_dump()
+                    if not check.complete:
+                        print(f"Görev aslında bitmemiş: {check.missing}. Devam ediliyor.")
+                        history.append(f"BİTTİ REDDEDİLDİ: bitiş kontrolünde eksik bulundu ({check.missing})")
+                        self.logger.log_step(record)
+                        continue
+                elif verify:
+                    record["final_check"] = None
+                    self.logger.log_step(record)
+                    return finish("DONE", f"{decision.reasoning} (bitiş doğrulaması yapılamadı)", step)
                 self.logger.log_step(record)
                 return finish("DONE", decision.reasoning, step)
             if decision.status == Status.IMPOSSIBLE:

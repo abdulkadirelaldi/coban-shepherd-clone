@@ -137,14 +137,15 @@ Basit bir klon tek görüntüye bakıp tek karar verir ("açık döngü"). Çoba
 1. Her adımda yeni görüntü alınır. Model görevi, geçmiş adımları ve gripper durumunu bilerek **sadece sıradaki adımı** seçer. Bu sayede "kırmızıların hepsini kutuya koy" gibi **çok adımlı** görevler yapılabilir.
 2. Model, **önceki adımın gerçekten başarılı olup olmadığını** görüntüden kontrol eder. Örneğin nesne kaydıysa sistem durumu düzeltir ve yeniden dener. `MAX_RETRIES` kez üst üste başarısız olursa operatörü çağırır.
 3. **Görme + dokunma sensör füzyonu:** Gripper'ın çene sensörü, kapanmadan sonra `DONE HELD` ya da `DONE EMPTY` bildirir. "Boş" cevabı geldiğinde adım modele sorulmadan başarısız sayılır. Bu özellik, gerçek Gemini testlerinde ortaya çıkan bir zayıflık üzerine eklendi (bkz. 6.2).
-4. Model her adımda bir **ilerleme sayacı** tutar ("kit tepsisi: 1/2 siyah konnektör, 0/1 kırmızı sigorta"). Böylece fazla ya da yanlış nesne taşımaz.
-5. Güvenlik kontrolleri:
+4. **Bitiş doğrulaması:** Model "bitti" dediğinde, ayrı bir kalite kontrol prompt'u son görüntüdeki nesneleri sayar. Eksik varsa "bitti" kararı reddedilir ve görev devam eder.
+5. Model her adımda bir **ilerleme sayacı** tutar ("kit tepsisi: 1/2 siyah konnektör, 0/1 kırmızı sigorta"). Böylece fazla ya da yanlış nesne taşımaz.
+6. Güvenlik kontrolleri:
    - düşük güvende hareket yok,
    - mantıksız kararların reddi (örneğin gripper doluyken AL),
    - firmware'de çalışma alanı sınırı,
    - kalibrasyon yoksa robotun hareket ettirilmemesi.
 
-Demo: [docs/demo/gemini/4_tutma_hatasi_sensorle_kurtarma.mp4](docs/demo/gemini/4_tutma_hatasi_sensorle_kurtarma.mp4). %40 tutma hatası verilen simülasyonda küp iki kez kayıyor. Sensör iki seferi de yakalıyor, Gemini yeniden planlıyor ve görev tamamlanıyor.
+Demo: [docs/demo/gemini/4_tutma_hatasi_sensorle_kurtarma.mp4](docs/demo/gemini/4_tutma_hatasi_sensorle_kurtarma.mp4). %40 tutma hatası verilen simülasyonda küp iki kez kayıyor ve sensör iki seferi de yakalıyor. Model bir küp kutuya girdiğinde erken "bitti" diyor; bitiş doğrulaması "bir kırmızı küp hâlâ masada" diyerek bunu reddediyor ve görev gerçekten tamamlanıyor.
 
 ### 5.4 Yenilik 3: Veri çarkı
 
@@ -173,11 +174,12 @@ Bu kayıtlar, ileride açık kaynak bir VLA modelini (örneğin π0 ya da LeRobo
 
 ### 6.1 Otomatik testler
 
-- **41 otomatik test** (`python -m unittest discover tests`). Kapsadıkları:
+- **43 otomatik test** (`python -m unittest discover tests`). Kapsadıkları:
   - model cevabı ayrıştırma,
   - kalibrasyon matematiği,
   - seri protokol (DONE / ERR / zaman aşımı / gripper sensörü),
   - API hatalarında yeniden deneme ve yedek modele geçiş,
+  - erken "bitti" kararının bitiş doğrulamasıyla yakalanması,
   - hareket dizileri,
   - simülasyon fiziği,
   - KVKK bulanıklaştırma,
@@ -194,16 +196,19 @@ Tüm görevler simülasyonda gerçek Gemini API'siyle çalıştırıldı. Videol
 | 1 | kırmızı küpleri sarı kutuya koy | gemini-3.8-flash | **DONE**, 5 adım, her adım doğrulandı |
 | 2 | çatlak olan konnektörü hurda kutusuna at | gemini-3.6-flash (yedek) | **DONE**, çatlak parça sağlamlarından ayırt edildi |
 | 3 | mor küpü beyaz tepsiye koy | gemini-3.6-flash (yedek) | **IMPOSSIBLE**, mor küp olmadığı fark edildi, robot hareket etmedi |
-| 4 | kırmızı küpleri sarı kutuya koy (%40 tutma hatası) | gemini-3.5-flash-lite | **DONE**, 2 kayma sensörle yakalandı, 7 adım |
+| 4 | kırmızı küpleri sarı kutuya koy (%40 tutma hatası) | gemini-3.5-flash-lite | **DONE**, 8 adım; 2 kayma sensörle, 1 erken "bitti" bitiş doğrulamasıyla yakalandı |
 | 5 | iki siyah konnektörü ve kırmızı sigortayı kit tepsisine koy | gemini-3.5-flash-lite | **DONE**, 7 adım, doğru sayım |
 
 İlk testte Gemini mavi küpün yerini **piksel düzeyinde doğru** buldu: tahmin (280, 220), gerçek konum (280, 220).
 
-**Testlerin ortaya çıkardığı sorunlar ve çözümleri.** Gerçek model testleri, kâhin politikayla görülemeyecek üç sorunu ortaya çıkardı:
+İlk tablodaki her sonuç, sadece modelin kendi beyanıyla değil, episode kaydının son karesi tek tek incelenerek doğrulandı.
+
+**Testlerin ortaya çıkardığı sorunlar ve çözümleri.** Gerçek model testleri, kâhin politikayla görülemeyecek dört sorunu ortaya çıkardı:
 
 1. **Fark edilmeyen kayma:** Küp sadece 1-2 cm kaydığında, tepeden bakan kamerada kapalı çenelerle üst üste göründüğü için Gemini tutmanın başarısız olduğunu anlayamadı ve "BIRAK" dedi. Gerçek robotlarda da görülen bu sorun **gripper sensörü füzyonuyla** çözüldü; sonrasında test 4 başarıyla tamamlandı.
 2. **Yanlış sayım:** En küçük model (flash-lite) kitting görevinde beyaz bir konnektörü siyah sandı ve fazladan tepsiye koydu. Prompt'a zorunlu bir **ilerleme sayacı** ve "bitti demeden önce hedefi kontrol et" kuralı eklendi; sonrasında aynı model görevi hatasız tamamladı (test 5).
-3. **API kotası ve yoğunluk:** Testler sırasında Google sunucuları sık sık 503/504 döndü ve ücretsiz kotanın günlük sınırı (429) doldu. Buna karşı artan bekleme süreleriyle **yeniden deneme** ve ayrı kotaya sahip bir **yedek modele otomatik geçiş** eklendi. Hangi adımda hangi modelin cevap verdiği artık episode kaydına yazılıyor.
+3. **Erken "bitti":** Tutma hatalı testin ilk denemesinde model, kayan küpü tekrar almak yerine zaten kutuda olan küpü alıp aynı kutuya geri bıraktı ve "bitti" dedi; ikinci küp masada kalmıştı. Bu hata, episode'un son karesi incelenirken fark edildi. Çözüm olarak model "bitti" dediğinde ayrı bir kalite kontrol prompt'uyla son görüntünün sayılması (**bitiş doğrulaması**) eklendi. Yeniden çekilen testte (test 4) model yine erken "bitti" dedi, ama doğrulama bunu yakaladı ve görev gerçekten tamamlandı.
+4. **API kotası ve yoğunluk:** Testler sırasında Google sunucuları sık sık 503/504 döndü ve ücretsiz kotanın günlük sınırı (429) doldu. Buna karşı artan bekleme süreleriyle **yeniden deneme** ve ayrı kotaya sahip bir **yedek modele otomatik geçiş** eklendi. Hangi adımda hangi modelin cevap verdiği artık episode kaydına yazılıyor.
 
 ---
 

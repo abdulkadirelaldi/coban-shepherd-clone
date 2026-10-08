@@ -23,7 +23,7 @@ from serial_controller import SerialController
 from simulator import IMAGE_SIZE, OraclePolicy, SimCamera, SimRobot, SimWorld, mm_to_px
 from task_runner import RobotExecutor, TaskRunner
 from vision_capture import VisionCapture
-from vla_engine import (Action, Status, VLAEngine, VLAResponse,
+from vla_engine import (Action, Status, StepDecision, VerifyResponse, VLAEngine, VLAResponse,
                         build_prompt, normalized_to_pixel)
 
 
@@ -158,6 +158,13 @@ class TestVLAEngine(unittest.TestCase):
                            fallback_model="backup", retry_delays=(0, 0))
         self.assertIsNone(engine.next_step(b"j", (640, 480), "al"))
         self.assertEqual(Denied.calls, 1)
+
+    def test_verify_done_parses_answer(self):
+        engine = make_engine({"reasoning": "1/2 küp kutuda", "missing": "1 kırmızı küp masada",
+                              "complete": False})
+        check = engine.verify_done(b"j", "kırmızı küpleri kutuya koy")
+        self.assertFalse(check.complete)
+        self.assertEqual(check.missing, "1 kırmızı küp masada")
 
     def test_schema_keeps_reasoning_first(self):
         self.assertEqual(list(VLAResponse.model_fields)[0], "reasoning")
@@ -383,6 +390,32 @@ class TestClosedLoop(unittest.TestCase):
         result = runner.run("bırak")
         self.assertEqual(result.status, "MAX_STEPS")
         self.assertEqual(world.gripper[:2], [settings.park_x_mm, settings.park_y_mm])
+
+    def test_premature_done_is_caught_by_final_check(self):
+        class Engine:
+            model = "fake"
+
+            def __init__(self):
+                self.histories, self.checks = [], [False, True]
+
+            def next_step(self, _jpeg, _size, _instruction, history, _holding):
+                self.histories.append(list(history))
+                return StepDecision(Status.DONE, Action.GRAB, "x", None, 0.9, "bitti", True)
+
+            def verify_done(self, _jpeg, _instruction):
+                complete = self.checks.pop(0)
+                return VerifyResponse(reasoning="sayım", missing="" if complete else "1 küp masada",
+                                      complete=complete)
+
+        settings = test_settings(self.tmp)
+        world = SimWorld("renkler")
+        engine = Engine()
+        runner = TaskRunner(engine, SimCamera(world), RobotExecutor(SimRobot(world), settings),
+                            world.calibration(), settings, "test")
+        result = runner.run("kırmızı küpleri sarı kutuya koy")
+        self.assertEqual(result.status, "DONE")
+        self.assertEqual(result.steps, 2)
+        self.assertIn("1 küp masada", engine.histories[1][-1])
 
     def test_plan_only_without_robot(self):
         settings = test_settings(self.tmp)

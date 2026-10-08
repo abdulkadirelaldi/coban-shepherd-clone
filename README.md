@@ -15,7 +15,7 @@
 | 1 | `kırmızı küpleri sarı kutuya koy` | DONE (5 adım) | Çok adımlı planlama, her adımın görüntüyle doğrulanması |
 | 2 | `çatlak olan konnektörü hurda kutusuna at` | DONE (3 adım) | Görsel kalite kontrol: çatlak parçayı sağlamlarından ayırma |
 | 3 | `mor küpü beyaz tepsiye koy` | IMPOSSIBLE | Masada olmayan nesne için robotu hiç hareket ettirmeme |
-| 4 | aynı görev, %40 tutma hatasıyla | DONE (7 adım) | Gripper sensörü kaymayı yakalıyor, model yeniden planlıyor |
+| 4 | aynı görev, %40 tutma hatasıyla | DONE (8 adım) | Gripper sensörü 2 kaymayı yakalıyor; modelin erken "bitti" kararını bitiş doğrulaması reddediyor |
 | 5 | `iki siyah konnektörü ve kırmızı sigortayı kit tepsisine koy` | DONE (7 adım) | Kablo demeti kitting, ilerleme sayacı |
 
 Her demonun yanında, modelin tüm kararlarını içeren `episode.json` dosyası da var.
@@ -79,7 +79,7 @@ Her görevden sonra `episodes/<tarih>_<görev>/` klasörü oluşur. İçinde `ep
 | `vision_capture.py` | OpenCV kamera, gerçek çözünürlük, JPEG, hata ayıklama görüntüsü |
 | `config.py` | Tüm ayarlar `.env` dosyasından okunur |
 | `firmware/` | Arduino/STM32: JSON komut ayrıştırma, çalışma alanı sınırları, gripper servosu, isteğe bağlı çene sensörü |
-| `tests/` | 41 birim ve uçtan uca test (simülasyon üzerinde kapalı döngü dahil) |
+| `tests/` | 43 birim ve uçtan uca test (simülasyon üzerinde kapalı döngü dahil) |
 
 ### Kapalı döngü nasıl çalışıyor?
 
@@ -89,6 +89,8 @@ Her adımda model görüntüyle birlikte şunları alır: Türkçe görev, şimd
 2. **Görev bitti mi (DONE), imkânsız mı (IMPOSSIBLE), yoksa sıradaki adım ne?** Sıradaki adım AL ya da BIRAK, nokta 0–1000 arası normalize koordinatla verilir.
 
 **Görme + dokunma sensör füzyonu:** Görüntüden bir tutmanın başarısız olduğunu anlamak her zaman kolay değildir. Gerçek testte nesne sadece 1-2 cm kaydığında Gemini bunu fark edemedi. Bu yüzden gripper'ın çene sensörü, CLOSE komutundan sonra `DONE HELD` ya da `DONE EMPTY` bildirir. Sensör "boş" derse adım modele sorulmadan başarısız sayılır; "dolu" derse bu bilgi de modele iletilir. Sensörsüz kartlarda sistem sadece görüntüyle doğrulamaya devam eder.
+
+**Bitiş doğrulaması:** Model "bitti" dediğinde buna hemen güvenilmez. Ayrı bir "kalite kontrolcü" prompt'u son görüntüde her nesneyi sayar. Eksik varsa "bitti" kararı reddedilir ve görev devam eder.
 
 **API dayanıklılığı:** Gemini geçici olarak yanıt veremezse (429/500/503/504) istek artan bekleme süreleriyle (3, 8, 15, 30 sn) tekrarlanır. Ana model yine yanıt vermezse `GEMINI_FALLBACK_MODEL`'e geçilir.
 

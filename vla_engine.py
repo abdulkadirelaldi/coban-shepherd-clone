@@ -52,6 +52,19 @@ Rules:
 """
 
 
+VERIFY_INSTRUCTION = """\
+You are the quality inspector of a pick-and-place robot cell. You receive a top-down image of the
+workspace and the operator's task (usually in Turkish). The robot claims the task is finished.
+Do not trust that claim: check the image yourself.
+For every kind of object the task mentions, count how many are at their destination and how many are
+still somewhere else. A requested object still lying on the table means the task is NOT complete.
+Also check that no object the task did not ask for was put into the destination.
+complete: true only if the image shows the task fully done.
+missing: short Turkish description of what is still wrong (empty if complete).
+reasoning: one short Turkish sentence with your counts.
+"""
+
+
 class Action(str, Enum):
     GRAB = "GRAB"
     DROP = "DROP"
@@ -74,6 +87,13 @@ class VLAResponse(BaseModel):
     point_y: int
     point_x: int
     confidence: float
+
+
+class VerifyResponse(BaseModel):
+    """Answer of the independent end-of-task check."""
+    reasoning: str
+    missing: str
+    complete: bool
 
 
 @dataclass
@@ -132,6 +152,12 @@ class VLAEngine:
             # No tools are used, so disable automatic function calling
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
+        self.verify_config = types.GenerateContentConfig(
+            system_instruction=VERIFY_INSTRUCTION,
+            response_mime_type="application/json",
+            response_schema=VerifyResponse,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        )
 
     def next_step(self, jpeg_bytes: bytes, image_size: Tuple[int, int], instruction: str,
                   history: Optional[List[str]] = None,
@@ -146,7 +172,7 @@ class VLAEngine:
         if response is None:
             return None
 
-        result = self._parse(response)
+        result = self._parse(response, VLAResponse)
         if result is None:
             return None
 
@@ -170,7 +196,23 @@ class VLAEngine:
             progress=result.progress,
         )
 
-    def _generate(self, contents):
+    def verify_done(self, jpeg_bytes: bytes, instruction: str) -> Optional[VerifyResponse]:
+        """
+        Independent second look before accepting DONE: the step policy can be wrong about
+        its own progress, so a separate inspector prompt checks the final image.
+        """
+        print("Bitiş doğrulaması yapılıyor...")
+        contents = [types.Part.from_bytes(data=jpeg_bytes, mime_type="image/jpeg"),
+                    f"Görev: {instruction}\nRobot görevin tamamlandığını söylüyor. Görüntüyü kontrol et."]
+        response = self._generate(contents, self.verify_config)
+        if response is None:
+            return None
+        result = self._parse(response, VerifyResponse)
+        if result is not None:
+            print(f"Bitiş doğrulaması: {'TAMAM' if result.complete else 'EKSİK'} | {result.reasoning}")
+        return result
+
+    def _generate(self, contents, config=None):
         """Call the model, retrying temporary errors, then falling back to a second model."""
         models = [self.model] + ([self.fallback_model] if self.fallback_model else [])
         for model in models:
@@ -178,7 +220,7 @@ class VLAEngine:
                 print(f"VLA modeline soruluyor ({model})...")
                 try:
                     response = self.client.models.generate_content(model=model, contents=contents,
-                                                                   config=self.config)
+                                                                   config=config or self.config)
                     self.last_model = model
                     return response
                 except errors.APIError as e:
@@ -198,9 +240,9 @@ class VLAEngine:
         return None
 
     @staticmethod
-    def _parse(response) -> Optional[VLAResponse]:
+    def _parse(response, schema):
         """Read the structured answer, falling back to parsing the raw text."""
-        if isinstance(getattr(response, "parsed", None), VLAResponse):
+        if isinstance(getattr(response, "parsed", None), schema):
             return response.parsed
 
         text = getattr(response, "text", None)
@@ -208,7 +250,7 @@ class VLAEngine:
             print("Hata: VLA modelinden boş cevap geldi (güvenlik filtresi olabilir).")
             return None
         try:
-            return VLAResponse.model_validate_json(text)
+            return schema.model_validate_json(text)
         except ValidationError as e:
             print(f"VLA cevabı çözümlenemedi: {e}")
             print(f"Ham cevap: {text}")
