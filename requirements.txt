@@ -1,0 +1,6 @@
+opencv-python>=4.8
+pyserial>=3.5
+google-genai>=1.0
+pydantic>=2.0
+python-dotenv>=1.0
+numpy>=1.24
