@@ -36,6 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fail-rate", type=float, default=0.0,
                         help="Simülasyonda tutma hatası olasılığı (0-1), kapalı döngü demosu için")
     parser.add_argument("--seed", type=int, help="Simülasyon rastgelelik tohumu")
+    parser.add_argument("--no-gripper-sensor", action="store_true",
+                        help="Simülasyonda gripper sensörünü kapat (doğrulama sadece görüntüden)")
     parser.add_argument("--task", help="Tek bir görevi çalıştırıp çık")
     parser.add_argument("--offline-demo", action="store_true",
                         help="API anahtarı olmadan, kâhin politika ile hazır demo görevini çalıştır (--sim ile)")
@@ -62,7 +64,8 @@ def main() -> int:
     if not args.offline_demo:
         print(f"\nVLA motoru başlatılıyor (Gemini: {settings.gemini_model})...")
         try:
-            engine = VLAEngine(settings.gemini_api_key, settings.gemini_model)
+            engine = VLAEngine(settings.gemini_api_key, settings.gemini_model,
+                               fallback_model=settings.gemini_fallback_model)
         except ValueError as e:
             print(f"Ayar hatası: {e}")
             print(".env.example dosyasını .env olarak kopyalayıp GEMINI_API_KEY değerini girin.")
@@ -82,7 +85,8 @@ def main() -> int:
             print(f"Hata: {e}")
             return 1
         camera = SimCamera(world)
-        robot = SimRobot(world, fail_rate=args.fail_rate, seed=args.seed)
+        robot = SimRobot(world, fail_rate=args.fail_rate, seed=args.seed,
+                         gripper_sensor=not args.no_gripper_sensor)
         calibration = world.calibration()
         executor: Optional[RobotExecutor] = RobotExecutor(robot, settings)
         mode = f"SİMÜLASYON ({args.scene})"

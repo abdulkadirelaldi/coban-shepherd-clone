@@ -6,6 +6,7 @@
  *   {"type":"GRIPPER","state":"OPEN" | "CLOSE"}
  * Replies:
  *   "READY" once after boot, "DONE" after each finished command, "ERR <reason>" on failure.
+ *   With a jaw position sensor, GRIPPER CLOSE answers "DONE HELD" or "DONE EMPTY".
  *
  * Requires the ArduinoJson library (v7) from the Library Manager.
  * moveTo() is the only hardware specific part: fill in your arm's kinematics there.
@@ -18,14 +19,20 @@ const int GRIPPER_SERVO_PIN = 9;
 const int GRIPPER_OPEN_ANGLE = 90;
 const int GRIPPER_CLOSED_ANGLE = 20;
 const unsigned long GRIPPER_MOVE_MS = 500;
+// Optional jaw feedback: analog pin wired to the servo's internal potentiometer
+// (e.g. a "feedback servo"), or -1 if the gripper has no sensor.
+const int GRIPPER_FEEDBACK_PIN = -1;
+// Analog reading when the jaws are fully closed on nothing; calibrate for your servo
+const int GRIPPER_EMPTY_READING = 180;
+const int GRIPPER_EMPTY_TOLERANCE = 25;
 
 // ---- Workspace limits in mm (reject anything outside) ----
 const float X_MIN = -250, X_MAX = 250;
 const float Y_MIN = 0, Y_MAX = 300;
 const float Z_MIN = 0, Z_MAX = 200;
 
-const size_t LINE_MAX = 128;
-char line[LINE_MAX];
+const size_t CMD_LINE_MAX = 128;
+char line[CMD_LINE_MAX];
 size_t lineLen = 0;
 bool lineOverflow = false;
 
@@ -43,6 +50,12 @@ bool moveTo(float x, float y, float z) {
 void setGripper(bool open) {
   gripper.write(open ? GRIPPER_OPEN_ANGLE : GRIPPER_CLOSED_ANGLE);
   delay(GRIPPER_MOVE_MS);
+}
+
+// True if the jaws stopped on an object, false if they closed completely.
+bool gripperHoldsObject() {
+  int reading = analogRead(GRIPPER_FEEDBACK_PIN);
+  return abs(reading - GRIPPER_EMPTY_READING) > GRIPPER_EMPTY_TOLERANCE;
 }
 
 bool inRange(float v, float lo, float hi) {
@@ -82,6 +95,10 @@ void handleCommand(const char* json) {
       setGripper(true);
     } else if (strcmp(state, "CLOSE") == 0) {
       setGripper(false);
+      if (GRIPPER_FEEDBACK_PIN >= 0) {
+        Serial.println(gripperHoldsObject() ? "DONE HELD" : "DONE EMPTY");
+        return;
+      }
     } else {
       Serial.println("ERR unknown gripper state");
       return;
@@ -115,7 +132,7 @@ void loop() {
       }
       lineLen = 0;
       lineOverflow = false;
-    } else if (lineLen < LINE_MAX - 1) {
+    } else if (lineLen < CMD_LINE_MAX - 1) {
       line[lineLen++] = c;
     } else {
       lineOverflow = true;

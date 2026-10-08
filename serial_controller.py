@@ -6,6 +6,7 @@ Protocol (one JSON object per line, 115200 baud):
     PC  -> MCU: {"type": "GRIPPER", "state": "OPEN" | "CLOSE"}
     MCU -> PC : "READY" once after boot
     MCU -> PC : "DONE" when a command has finished, or "ERR <reason>" if it was rejected
+                After GRIPPER CLOSE, boards with jaw feedback answer "DONE HELD" or "DONE EMPTY".
 """
 import json
 import sys
@@ -26,6 +27,10 @@ KNOWN_VENDOR_IDS = {
 
 
 class SerialController:
+    # Result of the last CLOSE: "HELD", "EMPTY" or None when the board has no jaw sensor
+    gripper_feedback: Optional[str] = None
+    last_reply: str = ""
+
     def __init__(self, port: Optional[str] = None, baudrate: int = 115200,
                  timeout: float = 1.0, ack_timeout_sec: float = 10.0):
         """
@@ -128,7 +133,13 @@ class SerialController:
             "type": "GRIPPER",
             "state": state
         }
-        return self.send_command(command)
+        self.gripper_feedback = None
+        ok = self.send_command(command)
+        if ok and state == "CLOSE":
+            for feedback in ("HELD", "EMPTY"):
+                if feedback in self.last_reply.split():
+                    self.gripper_feedback = feedback
+        return ok
 
     def _wait_for(self, expected: tuple, timeout_sec: float) -> bool:
         """Read lines until one of the expected replies, an ERR reply or the timeout."""
@@ -146,6 +157,7 @@ class SerialController:
                 if reply.startswith("ERR"):
                     return False
                 if any(reply.startswith(e) for e in expected):
+                    self.last_reply = reply
                     return True
         except serial.SerialException as e:
             print(f"Seri porttan okunamadı: {e}")

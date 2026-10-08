@@ -132,6 +132,8 @@ class TaskRunner:
                 "target": decision.target, "pixel": decision.pixel,
                 "confidence": decision.confidence, "reasoning": decision.reasoning,
                 "previous_step_succeeded": decision.previous_step_succeeded,
+                "progress": decision.progress,
+                "model": getattr(self.engine, "last_model", None) or self.engine.model,
             })
 
             # 1. Verify the previous step using the new observation
@@ -174,6 +176,8 @@ class TaskRunner:
             VisionCapture.save_debug_frame(frame, decision.pixel, ascii_tr(label),
                                            os.path.join(s.debug_dir, "last_frame.jpg"))
             print(f"Karar: {label} | {decision.reasoning}")
+            if decision.progress:
+                print(f"İlerleme: {decision.progress}")
 
             if self.executor is None or self.calibration is None:
                 record["executed"] = False
@@ -187,11 +191,24 @@ class TaskRunner:
             self.video_status = f"Adim {step}: {label}"
             ok = self.executor.execute(decision.action, x, y)
             record["executed"] = ok
+            # Touch feedback: a jaw sensor that closed on nothing is a certain failure
+            sensor = getattr(self.executor.robot, "gripper_feedback", None) \
+                if decision.action == Action.GRAB else None
+            record["gripper_sensor"] = sensor
             self.logger.log_step(record)
             if not ok:
                 return finish("FAILED", "Robot komutu başarısız oldu. Robotu kontrol edin.", step)
 
-            history.append(f"{decision.action.value} {decision.target}")
+            if sensor == "EMPTY":
+                failures += 1
+                history.append(f"GRAB {decision.target} -> BAŞARISIZ (gripper sensörü: çeneler boş kapandı)")
+                print(f"Gripper sensörü boş kapandığını bildirdi ({failures}/{s.max_retries}), yeniden planlanıyor.")
+                if failures >= s.max_retries:
+                    return finish("FAILED", "Aynı adım üst üste başarısız oldu, operatör kontrolü gerekli.", step)
+                continue
+
+            sensor_note = " (gripper sensörü: nesne tutuluyor)" if sensor == "HELD" else ""
+            history.append(f"{decision.action.value} {decision.target}{sensor_note}")
             held_before = holding
             holding = decision.target if decision.action == Action.GRAB else None
             last_action = decision.action

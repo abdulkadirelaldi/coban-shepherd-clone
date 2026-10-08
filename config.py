@@ -33,6 +33,7 @@ def _get_bool(name: str, default: bool) -> bool:
 class Settings:
     gemini_api_key: Optional[str]
     gemini_model: str
+    gemini_fallback_model: Optional[str]
     camera_index: int
     camera_width: int
     camera_height: int
@@ -57,6 +58,7 @@ def load_settings() -> Settings:
     return Settings(
         gemini_api_key=_get_str("GEMINI_API_KEY"),
         gemini_model=_get_str("GEMINI_MODEL", "gemini-3.8-flash"),
+        gemini_fallback_model=_get_str("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite"),
         camera_index=_get_int("CAMERA_INDEX", 0),
         camera_width=_get_int("CAMERA_WIDTH", 640),
         camera_height=_get_int("CAMERA_HEIGHT", 480),

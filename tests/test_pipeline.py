@@ -79,7 +79,7 @@ def make_engine(payload) -> VLAEngine:
 
 
 def answer(**overrides):
-    base = {"reasoning": "test", "previous_step_succeeded": True, "status": "CONTINUE",
+    base = {"reasoning": "test", "previous_step_succeeded": True, "progress": "0/1", "status": "CONTINUE",
             "action": "GRAB", "target": "kırmızı küp", "point_y": 250, "point_x": 750,
             "confidence": 0.9}
     base.update(overrides)
@@ -123,6 +123,41 @@ class TestVLAEngine(unittest.TestCase):
         self.assertIn("1. GRAB kırmızı küp", prompt)
         self.assertIn("tuttuğu sanılan nesne: kırmızı küp", prompt)
         self.assertIn("Gripper boş", build_prompt("x", [], None))
+
+    def test_retries_overloaded_model_then_falls_back(self):
+        from google.genai import errors
+
+        class Flaky:
+            def __init__(self):
+                self.models_called = []
+
+            def generate_content(self, model, **_kwargs):
+                self.models_called.append(model)
+                if model == "main":
+                    raise errors.APIError(503, {"error": {"message": "overloaded"}})
+                return SimpleNamespace(parsed=None, text=json.dumps(answer()))
+
+        flaky = Flaky()
+        engine = VLAEngine(None, "main", client=SimpleNamespace(models=flaky),
+                           fallback_model="backup", retry_delays=(0, 0))
+        self.assertIsNotNone(engine.next_step(b"j", (640, 480), "al"))
+        self.assertEqual(flaky.models_called, ["main", "main", "main", "backup"])
+        self.assertEqual(engine.last_model, "backup")
+
+    def test_non_retryable_error_fails_fast(self):
+        from google.genai import errors
+
+        class Denied:
+            calls = 0
+
+            def generate_content(self, **_kwargs):
+                Denied.calls += 1
+                raise errors.APIError(403, {"error": {"message": "denied"}})
+
+        engine = VLAEngine(None, "main", client=SimpleNamespace(models=Denied()),
+                           fallback_model="backup", retry_delays=(0, 0))
+        self.assertIsNone(engine.next_step(b"j", (640, 480), "al"))
+        self.assertEqual(Denied.calls, 1)
 
     def test_schema_keeps_reasoning_first(self):
         self.assertEqual(list(VLAResponse.model_fields)[0], "reasoning")
@@ -178,6 +213,17 @@ class TestSerialController(unittest.TestCase):
     def test_invalid_gripper_state_rejected(self):
         with self.assertRaises(ValueError):
             make_controller([]).send_gripper("GRAB")
+
+    def test_gripper_feedback_is_parsed(self):
+        ctrl = make_controller(["DONE EMPTY"])
+        self.assertTrue(ctrl.send_gripper("CLOSE"))
+        self.assertEqual(ctrl.gripper_feedback, "EMPTY")
+        ctrl = make_controller(["DONE HELD"])
+        ctrl.send_gripper("CLOSE")
+        self.assertEqual(ctrl.gripper_feedback, "HELD")
+        ctrl = make_controller(["DONE"])
+        ctrl.send_gripper("CLOSE")
+        self.assertIsNone(ctrl.gripper_feedback)  # Board without a jaw sensor
 
     def test_no_port_does_not_crash(self):
         ctrl = make_controller([])
@@ -271,10 +317,10 @@ class TestClosedLoop(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
-    def run_task(self, fail_rate=0.0, seed=None, **settings_overrides):
+    def run_task(self, fail_rate=0.0, seed=None, gripper_sensor=True, **settings_overrides):
         settings = test_settings(self.tmp, **settings_overrides)
         world = SimWorld("renkler", park=(settings.park_x_mm, settings.park_y_mm))
-        robot = SimRobot(world, fail_rate=fail_rate, seed=seed)
+        robot = SimRobot(world, fail_rate=fail_rate, seed=seed, gripper_sensor=gripper_sensor)
         runner = TaskRunner(OraclePolicy(world, "kırmızı küp", "sarı kutu"), SimCamera(world),
                             RobotExecutor(robot, settings), world.calibration(), settings,
                             "test", record_video=True)
@@ -298,8 +344,16 @@ class TestClosedLoop(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(result.episode_dir, "frames", "step_05.jpg")))
         self.assertGreater(os.path.getsize(os.path.join(result.episode_dir, "video.mp4")), 1000)
 
-    def test_recovers_from_failed_grasps(self):
+    def test_gripper_sensor_catches_failed_grasps(self):
         world, result = self.run_task(fail_rate=0.4, seed=3)
+        self.assertEqual(result.status, "DONE")
+        with open(os.path.join(result.episode_dir, "episode.json"), encoding="utf-8") as f:
+            sensors = [s.get("gripper_sensor") for s in json.load(f)["steps"]]
+        self.assertIn("EMPTY", sensors)
+        self.assertIn("HELD", sensors)
+
+    def test_recovers_from_failed_grasps_with_vision_only(self):
+        world, result = self.run_task(fail_rate=0.4, seed=3, gripper_sensor=False)
         self.assertEqual(result.status, "DONE")
         self.assertGreater(result.steps, 5)  # Retries were needed
         with open(os.path.join(result.episode_dir, "episode.json"), encoding="utf-8") as f:

@@ -246,8 +246,11 @@ class SimRobot:
     """Drop-in replacement for SerialController, acting on a SimWorld."""
 
     def __init__(self, world: SimWorld, fail_rate: float = 0.0, seed: Optional[int] = None,
-                 on_frame: Optional[Callable[[np.ndarray], None]] = None):
+                 on_frame: Optional[Callable[[np.ndarray], None]] = None, gripper_sensor: bool = True):
         self.world = world
+        # Simulated jaw position sensor: after CLOSE, reports whether something is between the jaws
+        self.gripper_sensor = gripper_sensor
+        self.gripper_feedback: Optional[str] = None
         self.fail_rate = fail_rate
         self.rng = random.Random(seed)
         self.on_frame = on_frame
@@ -308,7 +311,10 @@ class SimRobot:
                     else:
                         w.held = target
         self._emit(repeat=3)
-        print(f"[SIM] GRIPPER {state} -> DONE")
+        self.gripper_feedback = None
+        if state == "CLOSE" and self.gripper_sensor:
+            self.gripper_feedback = "HELD" if w.held is not None else "EMPTY"
+        print(f"[SIM] GRIPPER {state} -> DONE {self.gripper_feedback or ''}".rstrip())
         return True
 
     def _settle(self, obj: SimObject):

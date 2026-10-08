@@ -4,6 +4,22 @@
 
 Ödev raporu, araştırma ve kaynaklar: **[RAPOR.md](RAPOR.md)**
 
+![Gerçek Gemini ile kablo demeti kitting](docs/demo/gemini/kablo_demeti_kitting.gif)
+
+*Gerçek Gemini ile "iki siyah konnektörü ve kırmızı sigortayı kit tepsisine koy" görevi. Model her adımda ilerlemeyi sayıyor ve beyaz konnektöre dokunmuyor.*
+
+### Gerçek Gemini demoları ([docs/demo/gemini/](docs/demo/gemini/))
+
+| # | Görev | Sonuç | Gösterdiği |
+|---|---|---|---|
+| 1 | `kırmızı küpleri sarı kutuya koy` | DONE (5 adım) | Çok adımlı planlama, her adımın görüntüyle doğrulanması |
+| 2 | `çatlak olan konnektörü hurda kutusuna at` | DONE (3 adım) | Görsel kalite kontrol: çatlak parçayı sağlamlarından ayırma |
+| 3 | `mor küpü beyaz tepsiye koy` | IMPOSSIBLE | Masada olmayan nesne için robotu hiç hareket ettirmeme |
+| 4 | aynı görev, %40 tutma hatasıyla | DONE (7 adım) | Gripper sensörü kaymayı yakalıyor, model yeniden planlıyor |
+| 5 | `iki siyah konnektörü ve kırmızı sigortayı kit tepsisine koy` | DONE (7 adım) | Kablo demeti kitting, ilerleme sayacı |
+
+Her demonun yanında, modelin tüm kararlarını içeren `episode.json` dosyası da var.
+
 ## Hızlı başlangıç
 
 ```bash
@@ -19,6 +35,7 @@ cp .env.example .env               # GEMINI_API_KEY değerini gir
 python main.py --sim
 python main.py --sim --scene kablo --task "çatlak olan konnektörü hurda kutusuna at"
 python main.py --sim --fail-rate 0.3   # tutma hatalarını kapalı döngü nasıl düzeltiyor?
+python main.py --sim --fail-rate 0.3 --no-gripper-sensor   # aynısı, sadece görüntüyle doğrulama
 
 # 3) Gerçek kamera ve robot kol
 python calibration.py              # bir kez: kamera -> robot kalibrasyonu
@@ -28,7 +45,7 @@ python main.py                     # ya da --dry-run (sadece planla, robotu hare
 python -m unittest discover tests
 ```
 
-Her görevden sonra `episodes/<tarih>_<görev>/` klasörü oluşur. İçinde `episode.json` (tüm kararlar ve komutlar), `frames/` (modelin gördüğü görüntüler) ve simülasyonda `video.mp4` bulunur. Hazır demo videoları [docs/demo/](docs/demo/) klasöründe.
+Her görevden sonra `episodes/<tarih>_<görev>/` klasörü oluşur. İçinde `episode.json` (tüm kararlar ve komutlar), `frames/` (modelin gördüğü görüntüler) ve simülasyonda `video.mp4` bulunur. Kâhin politikayla (API'siz) alınmış videolar [docs/demo/offline/](docs/demo/offline/) klasöründe.
 
 ## Mimari
 
@@ -61,8 +78,8 @@ Her görevden sonra `episodes/<tarih>_<görev>/` klasörü oluşur. İçinde `ep
 | `serial_controller.py` | Mikrodenetleyiciyle JSON protokolü. Her komut için `DONE` bekler |
 | `vision_capture.py` | OpenCV kamera, gerçek çözünürlük, JPEG, hata ayıklama görüntüsü |
 | `config.py` | Tüm ayarlar `.env` dosyasından okunur |
-| `firmware/` | Arduino/STM32: JSON komut ayrıştırma, çalışma alanı sınırları, gripper servosu |
-| `tests/` | 37 birim ve uçtan uca test (simülasyon üzerinde kapalı döngü dahil) |
+| `firmware/` | Arduino/STM32: JSON komut ayrıştırma, çalışma alanı sınırları, gripper servosu, isteğe bağlı çene sensörü |
+| `tests/` | 41 birim ve uçtan uca test (simülasyon üzerinde kapalı döngü dahil) |
 
 ### Kapalı döngü nasıl çalışıyor?
 
@@ -70,6 +87,10 @@ Her adımda model görüntüyle birlikte şunları alır: Türkçe görev, şimd
 
 1. **Önceki adım gerçekten başarılı oldu mu?** Örneğin AL'dan sonra nesne gerçekten gripper'ın arasında mı? Başarısızsa sistem durumu düzeltir ve yeniden planlar. `MAX_RETRIES` kez üst üste başarısız olursa operatörü çağırır.
 2. **Görev bitti mi (DONE), imkânsız mı (IMPOSSIBLE), yoksa sıradaki adım ne?** Sıradaki adım AL ya da BIRAK, nokta 0–1000 arası normalize koordinatla verilir.
+
+**Görme + dokunma sensör füzyonu:** Görüntüden bir tutmanın başarısız olduğunu anlamak her zaman kolay değildir. Gerçek testte nesne sadece 1-2 cm kaydığında Gemini bunu fark edemedi. Bu yüzden gripper'ın çene sensörü, CLOSE komutundan sonra `DONE HELD` ya da `DONE EMPTY` bildirir. Sensör "boş" derse adım modele sorulmadan başarısız sayılır; "dolu" derse bu bilgi de modele iletilir. Sensörsüz kartlarda sistem sadece görüntüyle doğrulamaya devam eder.
+
+**API dayanıklılığı:** Gemini geçici olarak yanıt veremezse (429/500/503/504) istek artan bekleme süreleriyle (3, 8, 15, 30 sn) tekrarlanır. Ana model yine yanıt vermezse `GEMINI_FALLBACK_MODEL`'e geçilir.
 
 Ek güvenlik kontrolleri:
 - `MIN_CONFIDENCE` altındaki kararlarda robot hareket etmez.
@@ -83,6 +104,7 @@ Ek güvenlik kontrolleri:
 |---|---|---|
 | `GEMINI_API_KEY` | — | Zorunlu (`--offline-demo` hariç). https://aistudio.google.com/apikey |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Kullanılacak Gemini modeli |
+| `GEMINI_FALLBACK_MODEL` | `gemini-3.5-flash-lite` | Ana model aşırı yoğunken kullanılan yedek model |
 | `CAMERA_INDEX` / `CAMERA_WIDTH` / `CAMERA_HEIGHT` | `0` / `640` / `480` | Kamera (çözünürlük sadece istektir; gerçek boyut her karede okunur) |
 | `SERIAL_PORT` / `SERIAL_BAUDRATE` | otomatik / `115200` | Örn. `/dev/cu.usbmodem1101`, `COM3` |
 | `ACK_TIMEOUT_SEC` | `10` | Bir komutun `DONE` cevabı için en fazla bekleme süresi |
@@ -96,7 +118,7 @@ Ek güvenlik kontrolleri:
 
 ## Gerçek donanım
 
-1. **Firmware:** Arduino IDE → Library Manager → **ArduinoJson** (v7) kur. `firmware/shepherd_firmware/shepherd_firmware.ino` dosyasındaki `moveTo()` fonksiyonunu kendi kolunun ters kinematiğiyle doldur, pin ve sınırları düzenle, karta yükle.
+1. **Firmware:** Arduino IDE → Library Manager → **ArduinoJson** (v7) kur. `firmware/shepherd_firmware/shepherd_firmware.ino` dosyasındaki `moveTo()` fonksiyonunu kendi kolunun ters kinematiğiyle doldur, pin ve sınırları düzenle, karta yükle. Gripper'da konum geri bildirimli bir servo varsa `GRIPPER_FEEDBACK_PIN` ve `GRIPPER_EMPTY_READING` değerlerini ayarla; sensör desteği o zaman devreye girer.
 2. **Kalibrasyon:** Masaya robot koordinatlarını bildiğin en az 4 (tercihen 6+) işaret koy, `python calibration.py` çalıştır, her işarete tıkla ve X Y değerini gir, `c` tuşuna bas. Kamerayı sonradan oynatma.
 3. `python main.py --dry-run` ile önce sadece planlamayı dene, sonra `python main.py` ile gerçek çalıştırmaya geç.
 

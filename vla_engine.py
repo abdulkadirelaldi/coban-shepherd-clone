@@ -7,15 +7,20 @@ and decides only the NEXT step. This mimics how VLA policies re-plan from
 new observations instead of executing a fixed open-loop plan.
 """
 import json
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple
 from pydantic import BaseModel, ValidationError
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 # Gemini returns points normalized to a 0-1000 grid, independent of image size
 NORMALIZED_MAX = 1000
+
+# Overloaded / rate limited / server errors are temporary: retry with backoff
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+RETRY_DELAYS_SEC = (3, 8, 15, 30)
 
 SYSTEM_INSTRUCTION = """\
 You are "Çoban", the closed-loop brain of a pick-and-place robot arm working in a Turkish factory.
@@ -27,17 +32,23 @@ Rules:
    - after GRAB the object must be between the gripper jaws and gone from its old place,
    - after DROP the object must lie at the drop location and the gripper must be empty.
    Set previous_step_succeeded accordingly (true if there was no previous step).
-2. If the task is completely done, status=DONE. If it cannot be done (object missing, task
+2. Keep count. In progress, write in Turkish how many of each requested object are already at their
+   destination versus how many the task asks for, e.g. "kit tepsisi: 2/2 siyah konnektör, 0/1 kırmızı sigorta".
+   Never move more objects than requested. Check colors and damage carefully: a white connector is not
+   a black one, a cracked part is not an intact one.
+   Before answering DONE, verify that every requested object is at its destination and that you did not
+   put any object there that the task did not ask for.
+3. If the task is completely done, status=DONE. If it cannot be done (object missing, task
    ambiguous or unsafe), status=IMPOSSIBLE. Otherwise status=CONTINUE with exactly one action:
    - GRAB: only when the gripper is empty. Point at the center of the object to pick up.
    - DROP: only when the gripper holds an object. Point at where it must be put down
      (inside the requested container or on a free spot of the table, never on another object).
-3. Handle one object at a time. Never pick an object that is already where the task wants it.
-4. point_y and point_x are normalized to 0-1000 (0,0 = top-left, 1000,1000 = bottom-right).
+4. Handle one object at a time. Never pick an object that is already where the task wants it.
+5. point_y and point_x are normalized to 0-1000 (0,0 = top-left, 1000,1000 = bottom-right).
    Use 0,0 when status is DONE or IMPOSSIBLE.
-5. target: short Turkish name of the object or place, e.g. "kırmızı küp", "sarı kutu".
-6. reasoning: one short sentence in Turkish.
-7. confidence: your probability (0.0-1.0) that this step and point are correct.
+6. target: short Turkish name of the object or place, e.g. "kırmızı küp", "sarı kutu".
+7. reasoning: one short sentence in Turkish.
+8. confidence: your probability (0.0-1.0) that this step and point are correct.
 """
 
 
@@ -56,6 +67,7 @@ class VLAResponse(BaseModel):
     """JSON schema the model is forced to answer with."""
     reasoning: str
     previous_step_succeeded: bool
+    progress: str
     status: Status
     action: Action
     target: str
@@ -74,6 +86,7 @@ class StepDecision:
     confidence: float
     reasoning: str
     previous_step_succeeded: bool
+    progress: str = ""
 
 
 def normalized_to_pixel(point_x: int, point_y: int, image_size: Tuple[int, int]) -> Tuple[int, int]:
@@ -98,7 +111,8 @@ def build_prompt(instruction: str, history: List[str], holding: Optional[str]) -
 
 
 class VLAEngine:
-    def __init__(self, api_key: Optional[str], model: str, client: Optional[genai.Client] = None):
+    def __init__(self, api_key: Optional[str], model: str, client: Optional[genai.Client] = None,
+                 fallback_model: Optional[str] = None, retry_delays: Tuple[float, ...] = RETRY_DELAYS_SEC):
         """Initialize the Gemini client. A client can be injected for testing."""
         if client is None:
             if not api_key:
@@ -107,6 +121,10 @@ class VLAEngine:
 
         self.client = client
         self.model = model
+        self.fallback_model = fallback_model if fallback_model != model else None
+        # The model that produced the last answer (the fallback may have been used)
+        self.last_model: Optional[str] = None
+        self.retry_delays = retry_delays
         self.config = types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION,
             response_mime_type="application/json",
@@ -123,15 +141,9 @@ class VLAEngine:
         or the answer is malformed.
         """
         prompt = build_prompt(instruction, history or [], holding)
-        print(f"VLA modeline soruluyor ({self.model})...")
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=[types.Part.from_bytes(data=jpeg_bytes, mime_type="image/jpeg"), prompt],
-                config=self.config,
-            )
-        except Exception as e:
-            print(f"VLA API hatası: {e}")
+        contents = [types.Part.from_bytes(data=jpeg_bytes, mime_type="image/jpeg"), prompt]
+        response = self._generate(contents)
+        if response is None:
             return None
 
         result = self._parse(response)
@@ -155,7 +167,35 @@ class VLAEngine:
             confidence=max(0.0, min(1.0, result.confidence)),
             reasoning=result.reasoning,
             previous_step_succeeded=result.previous_step_succeeded,
+            progress=result.progress,
         )
+
+    def _generate(self, contents):
+        """Call the model, retrying temporary errors, then falling back to a second model."""
+        models = [self.model] + ([self.fallback_model] if self.fallback_model else [])
+        for model in models:
+            for attempt in range(len(self.retry_delays) + 1):
+                print(f"VLA modeline soruluyor ({model})...")
+                try:
+                    response = self.client.models.generate_content(model=model, contents=contents,
+                                                                   config=self.config)
+                    self.last_model = model
+                    return response
+                except errors.APIError as e:
+                    if e.code not in RETRYABLE_STATUS:
+                        print(f"VLA API hatası: {e}")
+                        return None
+                    if attempt < len(self.retry_delays):
+                        delay = self.retry_delays[attempt]
+                        print(f"Model geçici olarak yanıt veremiyor ({e.code}), {delay} sn sonra tekrar denenecek...")
+                        time.sleep(delay)
+                except Exception as e:
+                    print(f"VLA API hatası: {e}")
+                    return None
+            if model != models[-1]:
+                print(f"{model} yanıt vermiyor, yedek modele geçiliyor.")
+        print("VLA API hatası: model şu an yanıt vermiyor, daha sonra tekrar deneyin.")
+        return None
 
     @staticmethod
     def _parse(response) -> Optional[VLAResponse]:
